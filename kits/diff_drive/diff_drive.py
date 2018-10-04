@@ -8,7 +8,7 @@ import numpy as np
 from numpy.distutils.fcompiler import none
 
 #wait for network interfaces go come up
-sleep(5)
+sleep(10)
 
 # Create lookup
 lookup = hebi.Lookup()
