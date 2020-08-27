@@ -25,6 +25,10 @@ class HebiThread(threading.Thread):
     self.durations = []
     self.run_mode = "training"
     self.playback_waypoint = 0
+    
+    # Currently these are unused as we are only using stop waypoints
+    self.vels = []
+    self.accels = []
 
     # start the thread
     self.start()
@@ -96,23 +100,23 @@ class HebiThread(threading.Thread):
 
     # This should only work during training mode
     if not self.run_mode == "training":
-      print("You can't start playback unless you are in training mode!")
-
-    # There should always be at least 2 waypoints for playback
-    if len(self.waypoints) > 1:
-      print("Starting playback of waypoints")
-      self.run_mode = "playback"
-      self.playback_waypoint = 0 # reset playback_waypoint before starting playback
-      self.arm.gripper.open()
-      self.arm.send()
+      print("You are already in playback mode.")
     else:
-      print("At least two waypoints are needed!")   
+      # There should always be at least 2 waypoints for playback
+      if len(self.waypoints) > 1:
+        print("Starting playback of waypoints")
+        self.run_mode = "playback"
+        self.playback_waypoint = 0 # reset playback_waypoint before starting playback
+        self.arm.gripper.open()
+        self.arm.send()
+      else:
+        print("At least two waypoints are needed!")   
 
   def training_button(self):
     
     # This should only work during playback mode
     if not self.run_mode == "playback":
-      print("You can't return to training unless you are in playback mode!")
+      print("You are already in training mode.")
     else:
       # Cancel goal and return to training mode
       print("Returning to training")
@@ -125,17 +129,98 @@ class HebiThread(threading.Thread):
     self.durations = []
     self.grip_states = []
 
-# STILL TO DO:
-# DONE Add a new button and function for "return to training mode" instead of toggle playback
-# DONE Finish the "run" logic, so that the arm is sending the commands out to the arm
-# DONE this will complete the teach repeat example, gui example. Commit that.
+  def load_from_csv(self, file):
 
+    # Read the csv document
+    waypoint_reader = file.read()
+    rows = waypoint_reader.split('\n')
+
+    # First, we extract the descriptive information:
+    # dofs, gripper, # of waypoints
+    dof = int(rows[0])
+    has_gripper = bool(rows[1])
+    num_waypoints = int(rows[2])
+
+    # Check that the opened file is compatible with current arm
+    # If not, then return False
+    curr_dof = self.arm.group.size
+    curr_has_gripper = False if (self.arm.gripper is None) else True
+    
+    if (dof is not curr_dof) or (has_gripper is not curr_has_gripper):
+      return False
+    else:
+      # Clear our current stores values
+      self.waypoints = []
+      self.grip_states = []
+      self.durations = []
+      self.run_mode = "training"
+      self.playback_waypoint = 0
+      self.vels = []
+      self.accels = []
+
+      # Remove the last row, which is a blank
+      rows = rows[:-1]
+
+      # Disassemble the remaining csv, row by row, to extract desired information
+      for row in rows[3:]:
+        row_vals = row.split(',')
+
+        # break the row up and store the appropriate values from
+        # [duration, grip_state, positions[0->n], velocities[0->n], accels[0->n]]
+        self.durations.append(float(row_vals[0]))
+        if has_gripper:
+          self.grip_states.append(int(row_vals[1]))
+        waypoint_extraction = np.asarray(row_vals[ 2:2+dof ])
+        self.waypoints.append(waypoint_extraction.astype(np.float))
+
+        # When they are set to be used, they can accessed here:  
+        # self.vels.append(np.asarray(row_vals[ 2+dof:2+2*dof ]))
+        # self.accels.append(np.asarray(row_vals[ 2+2*dof: ]))
+    
+      print ("Durations:", self.durations)
+      print ("Grip_states:", self.grip_states)
+      print ("Waypoints:", self.waypoints)
+      # When they are set to be used, they can be printed here: 
+      # print ("Velocities:", self.vels)
+      # print ("Accelerations:", self.accels)
+
+  def save_to_csv(self, file):
+    with file as save_file:
+      waypoint_writer = csv.writer(save_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+
+      # first line will contain the degrees of freedom involved
+      waypoint_writer.writerow([self.arm.group.size])
+      
+      # second line will say if there is a gripper or not
+      grip_states_to_save = []
+      if self.arm.gripper is None:
+        waypoint_writer.writerow([False])
+        grip_states_to_save = [0] * len(self.durations) # 0 also means the gripper remains open
+      else:
+        waypoint_writer.writerow([True])
+        grip_states_to_save = self.grip_states
+      
+      # third line will list how many waypoints there are saved
+      waypoint_writer.writerow([len(self.waypoints)])
+
+      # Create empty arrays for vels and accels
+      # set to 0 for stop waypoints
+      vels = [0] * self.arm.group.size
+      accels = [0] * self.arm.group.size
+
+      # Construct the mea of the waypoint saving
+      # The structure is:
+      # [duration, grip_state, positions[0->n], velocities[0->n], accels[0->n]]
+      for i in range (len(self.waypoints)):
+        waypoint_writer.writerow([self.durations[i]] +
+                                 [grip_states_to_save[i]] +
+                                 self.waypoints[i].tolist() + 
+                                 vels +
+                                 accels)
+
+# STILL TO DO:
 # ToDo: Gotta make sure that packet loss doesn't make the arm jerk around.
 # ToDo: Address the gripper issue of retraining later and not capturing proper gripper points
-
-# Now to add the saving and loading of waypoints (after a quick clean up)
-# Save the important data (waypoints, durations, and grip states) to a file
-# when loading, confirm that joints line up, and that there is a gripper
 
 # Now to add the visual part (after a quick clean up):
 # Add the waypoint representation in the gui.
@@ -154,7 +239,7 @@ class TeachRepeatFrame(wx.Frame):
     self.hebi_thread = HebiThread(arm)
 
     # Save & load variables
-    self.contentSaved = False
+    self.contentSaved = False # currently not in use anymore
 
     # Center the frame on the screen, declare size
     self.SetSize((1000,600))
@@ -174,11 +259,11 @@ class TeachRepeatFrame(wx.Frame):
     vbox_waypoints = wx.BoxSizer(wx.VERTICAL)
 
     ### Create the left bar of buttons
-    vbox_buttons.AddSpacer(10)
+    vbox_buttons.AddSpacer(30)
 
     # Button: Load Waypoints
     load_button = wx.Button(panel_main, label = "Load Waypoints")
-    load_button.Bind(wx.EVT_BUTTON, self.on_exit)
+    load_button.Bind(wx.EVT_BUTTON, self.on_load)
     vbox_buttons.Add(load_button, flag=wx.EXPAND)
 
     vbox_buttons.AddSpacer(10)
@@ -255,111 +340,84 @@ class TeachRepeatFrame(wx.Frame):
 
 
   def on_exit(self, event):
-    """Close the frame, terminating the application."""
+    # Close the frame, terminating the application
     self.hebi_thread.abort()
     self.Close(True)
 
-  def on_hello(self, event):
-    """Say hello to the user."""
-    wx.MessageBox("Hello again from wxPython")
+  def on_load(self, event):
+    # self.contentSaved = False
+    # if not self.contentSaved:
+    #     if wx.MessageBox("Current waypoint has not been saved! Proceed?", "Lose current ",
+    #                      wx.ICON_QUESTION | wx.YES_NO, self) == wx.NO:
+    #         return
 
+    if self.hebi_thread.run_mode is "playback":
+      wx.MessageBox("You can't load waypoints during playback. Please switch back to training mode.", "Switch back to training mode")
+    else:
+      with wx.FileDialog(self, "Load waypoints from CSV file", wildcard="CSV files (*.csv)|*.csv",
+                        style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as fileDialog:
 
-  # def OnOpen(self, event):
+        if fileDialog.ShowModal() == wx.ID_CANCEL:
+          return     # the user changed their mind
 
-  #   if not self.contentSaved:
-  #       if wx.MessageBox("Current content has not been saved! Proceed?", "Please confirm",
-  #                        wx.ICON_QUESTION | wx.YES_NO, self) == wx.NO:
-  #           return
+        # Proceed loading the file chosen by the user
+        pathname = fileDialog.GetPath()
+        try:
+          with open(pathname, 'r') as file:      
+            load = self.hebi_thread.load_from_csv(file)
+            if load is False: # this means the load was unsuccesful
+              wx.MessageBox("The file you are loading is not compatible with your current arm. There is a mismatch in your number of joints or gripper.",
+                          "Incompatible Save File")
+            else: # laod was succesful
+              wx.MessageBox("Waypoints succesfully loaded.", "Waypoints Loaded")
 
-  #   # otherwise ask the user what new file to open
-  #   with wx.FileDialog(self, "Open XYZ file", wildcard="XYZ files (*.xyz)|*.xyz",
-  #                      style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as fileDialog:
-
-  #       if fileDialog.ShowModal() == wx.ID_CANCEL:
-  #           return     # the user changed their mind
-
-  #       # Proceed loading the file chosen by the user
-  #       pathname = fileDialog.GetPath()
-  #       try:
-  #           with open(pathname, 'r') as file:
-  #               self.doLoadDataOrWhatever(file)
-  #       except IOError:
-  #           wx.LogError("Cannot open file '%s'." % newfile)
-
-
-  def save_to_csv(self, file):
-    with file as save_file:
-      waypoint_writer = csv.writer(save_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-
-      # first line will contain the degrees of freedom involved
-      waypoint_writer.writerow([self.hebi_thread.arm.group.size])
-      
-      # second line will say if there is a gripper or not
-      grip_states_to_save = []
-      if self.hebi_thread.arm.gripper is None:
-        waypoint_writer.writerow([False])
-        grip_states_to_save = [0] * len(self.hebi_thread.durations) # 0 also means the gripper remains open
-      else:
-        waypoint_writer.writerow([True])
-        grip_states_to_save = self.hebi_thread.grip_states
-      
-      # Create empty arrays for vels and accels
-      # set to 0 for stop waypoints
-      vels = [0] * self.hebi_thread.arm.group.size
-      accels = [0] * self.hebi_thread.arm.group.size
-
-      # Construct the mea of the waypoint saving
-      # The structure is:
-      # [duration, grip_state, positions[0->n], velocities[0->n], accels[0->n]]
-      for i in range (len(self.hebi_thread.waypoints)):
-        waypoint_writer.writerow([self.hebi_thread.durations[i]] +
-                                 [grip_states_to_save[i]] +
-                                 self.hebi_thread.waypoints[i].tolist() + 
-                                 vels +
-                                 accels)
-
+        except IOError:
+          wx.LogError("Cannot open file '%s'." % newfile)
 
   def on_save(self, event):
     # This button will print an error that is to be EXPECTED on macos.
     # This error does not affect functionality, and is apparantely unavoidable.
     
-    # Check that there is at least one waypoint to save
-    if len(self.hebi_thread.waypoints) < 1:
-      wx.MessageBox("You need to have at least one waypoint before you can save.", "You have not recorded any waypoints")
-
-    # Knowing there is at least one waypoint to save, we proceed
+    if self.hebi_thread.run_mode is "playback":
+      wx.MessageBox("You can't save waypoints during playback. Please switch back to training mode.", "Switch back to training mode")
     else:
-      with wx.FileDialog(self, "Save waypoints as csv file", wildcard="CSV files (*.csv)|*.csv",
-                         style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as fileDialog:
+      # Check that there is at least one waypoint to save
+      if len(self.hebi_thread.waypoints) < 1:
+        wx.MessageBox("You need to have at least one waypoint before you can save.", "You have not recorded any waypoints")
 
-        if fileDialog.ShowModal() == wx.ID_CANCEL:
-          return     # the user changed their mind
+      # Knowing there is at least one waypoint to save, we proceed
+      else:
+        with wx.FileDialog(self, "Save waypoints as csv file", wildcard="CSV files (*.csv)|*.csv",
+                          style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as fileDialog:
 
-        # save the current contents in the file
-        pathname = fileDialog.GetPath()
-        try:
-          with open(pathname, 'w') as file:
-            self.save_to_csv(file)
-        except IOError:
-          wx.LogError("Cannot save current data in file '%s'." % pathname)
+          if fileDialog.ShowModal() == wx.ID_CANCEL:
+            return     # the user changed their mind
 
-
-
-
-
-
-
-
-
+          # save the current contents in the file
+          pathname = fileDialog.GetPath()
+          try:
+            with open(pathname, 'w') as file:
+              self.hebi_thread.save_to_csv(file)
+          except IOError:
+            wx.LogError("Cannot save current data in file '%s'." % pathname)
 
   def on_add_waypoint(self, event):
-    self.hebi_thread.add_waypoint()
+    if self.hebi_thread.run_mode is "playback":
+      wx.MessageBox("You can't add waypoints during playback. Please switch back to training mode.", "Switch back to training mode")
+    else:
+      self.hebi_thread.add_waypoint()
 
   def on_add_waypoint_toggle(self, event):
-    self.hebi_thread.add_waypoint_toggle()
+    if self.hebi_thread.run_mode is "playback":
+      wx.MessageBox("You can't add waypoints during playback. Please switch back to training mode.", "Switch back to training mode")
+    else:
+      self.hebi_thread.add_waypoint_toggle()
 
   def on_clear(self, event):
-    self.hebi_thread.clear_waypoints()
+    if self.hebi_thread.run_mode is "playback":
+      wx.MessageBox("You can't clear waypoints during playback. Please switch back to training mode.", "Switch back to training mode")
+    else:
+      self.hebi_thread.clear_waypoints()
 
   def on_playback_button(self, event):
     self.hebi_thread.playback_button()
