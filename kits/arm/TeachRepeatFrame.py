@@ -3,6 +3,8 @@
 from time import time
 import threading
 import arm
+import csv
+import numpy as np
 
 import wx
 
@@ -111,11 +113,11 @@ class HebiThread(threading.Thread):
     # This should only work during playback mode
     if not self.run_mode == "playback":
       print("You can't return to training unless you are in playback mode!")
-
-    # Cancel goal and return to training mode
-    print("Returning to training")
-    self.run_mode = "training"
-    self.arm.cancelGoal()
+    else:
+      # Cancel goal and return to training mode
+      print("Returning to training")
+      self.run_mode = "training"
+      self.arm.cancelGoal()
 
   def clear_waypoints(self):
     print("Cleared waypoints")
@@ -151,6 +153,9 @@ class TeachRepeatFrame(wx.Frame):
     # It should pass the arm object that is created
     self.hebi_thread = HebiThread(arm)
 
+    # Save & load variables
+    self.contentSaved = False
+
     # Center the frame on the screen, declare size
     self.SetSize((1000,600))
     self.Centre()
@@ -180,7 +185,7 @@ class TeachRepeatFrame(wx.Frame):
 
     # Button: Save Waypoints
     save_button = wx.Button(panel_main, label = "Save Waypoints")
-    save_button.Bind(wx.EVT_BUTTON, self.on_exit)
+    save_button.Bind(wx.EVT_BUTTON, self.on_save)
     vbox_buttons.Add(save_button, flag=wx.EXPAND)
 
     vbox_buttons.AddSpacer(100)
@@ -228,7 +233,7 @@ class TeachRepeatFrame(wx.Frame):
     # Add the left bar sizer into the overall sizer
     main_box.Add(vbox_buttons, proportion = 1, flag = wx.EXPAND | wx.ALL)
 
-    # Add spacer to separate left bar from the 
+    # Add spacer to separate left bar from the rest of the conentts 
     main_box.AddSpacer(50)
 
     ### Add the grid of trajectory things
@@ -257,6 +262,95 @@ class TeachRepeatFrame(wx.Frame):
   def on_hello(self, event):
     """Say hello to the user."""
     wx.MessageBox("Hello again from wxPython")
+
+
+  # def OnOpen(self, event):
+
+  #   if not self.contentSaved:
+  #       if wx.MessageBox("Current content has not been saved! Proceed?", "Please confirm",
+  #                        wx.ICON_QUESTION | wx.YES_NO, self) == wx.NO:
+  #           return
+
+  #   # otherwise ask the user what new file to open
+  #   with wx.FileDialog(self, "Open XYZ file", wildcard="XYZ files (*.xyz)|*.xyz",
+  #                      style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as fileDialog:
+
+  #       if fileDialog.ShowModal() == wx.ID_CANCEL:
+  #           return     # the user changed their mind
+
+  #       # Proceed loading the file chosen by the user
+  #       pathname = fileDialog.GetPath()
+  #       try:
+  #           with open(pathname, 'r') as file:
+  #               self.doLoadDataOrWhatever(file)
+  #       except IOError:
+  #           wx.LogError("Cannot open file '%s'." % newfile)
+
+
+  def save_to_csv(self, file):
+    with file as save_file:
+      waypoint_writer = csv.writer(save_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+
+      # first line will contain the degrees of freedom involved
+      waypoint_writer.writerow([self.hebi_thread.arm.group.size])
+      
+      # second line will say if there is a gripper or not
+      grip_states_to_save = []
+      if self.hebi_thread.arm.gripper is None:
+        waypoint_writer.writerow([False])
+        grip_states_to_save = [0] * len(self.hebi_thread.durations) # 0 also means the gripper remains open
+      else:
+        waypoint_writer.writerow([True])
+        grip_states_to_save = self.hebi_thread.grip_states
+      
+      # Create empty arrays for vels and accels
+      # set to 0 for stop waypoints
+      vels = [0] * self.hebi_thread.arm.group.size
+      accels = [0] * self.hebi_thread.arm.group.size
+
+      # Construct the mea of the waypoint saving
+      # The structure is:
+      # [duration, grip_state, positions[0->n], velocities[0->n], accels[0->n]]
+      for i in range (len(self.hebi_thread.waypoints)):
+        waypoint_writer.writerow([self.hebi_thread.durations[i]] +
+                                 [grip_states_to_save[i]] +
+                                 self.hebi_thread.waypoints[i].tolist() + 
+                                 vels +
+                                 accels)
+
+
+  def on_save(self, event):
+    # This button will print an error that is to be EXPECTED on macos.
+    # This error does not affect functionality, and is apparantely unavoidable.
+    
+    # Check that there is at least one waypoint to save
+    if len(self.hebi_thread.waypoints) < 1:
+      wx.MessageBox("You need to have at least one waypoint before you can save.", "You have not recorded any waypoints")
+
+    # Knowing there is at least one waypoint to save, we proceed
+    else:
+      with wx.FileDialog(self, "Save waypoints as csv file", wildcard="CSV files (*.csv)|*.csv",
+                         style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as fileDialog:
+
+        if fileDialog.ShowModal() == wx.ID_CANCEL:
+          return     # the user changed their mind
+
+        # save the current contents in the file
+        pathname = fileDialog.GetPath()
+        try:
+          with open(pathname, 'w') as file:
+            self.save_to_csv(file)
+        except IOError:
+          wx.LogError("Cannot save current data in file '%s'." % pathname)
+
+
+
+
+
+
+
+
+
 
   def on_add_waypoint(self, event):
     self.hebi_thread.add_waypoint()
