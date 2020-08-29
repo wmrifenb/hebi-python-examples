@@ -113,7 +113,6 @@ class HebiThread(threading.Thread):
         print("At least two waypoints are needed!")   
 
   def training_button(self):
-    
     # This should only work during playback mode
     if not self.run_mode == "playback":
       print("You are already in training mode.")
@@ -130,7 +129,6 @@ class HebiThread(threading.Thread):
     self.grip_states = []
 
   def load_from_csv(self, file):
-
     # Read the csv document
     waypoint_reader = file.read()
     rows = waypoint_reader.split('\n')
@@ -336,9 +334,7 @@ class TeachRepeatFrame(wx.Frame):
                             wx.StaticText(self.panel_main, label='Grip_State', style=wx.ALIGN_CENTRE_HORIZONTAL) ])
   
     for i in range(columns-3):
-      # print (i)
       header = "Joint %d" % (i+1)
-      # print(header)
       waypoint_grid.Add(wx.StaticText(self.panel_main, label=header))
 
     # if there are any waypoints, we then also show them on the screen
@@ -369,20 +365,6 @@ class TeachRepeatFrame(wx.Frame):
           text_joint = wx.TextCtrl(self.panel_main, value = str(round(joint, 2)), style =  wx.TE_CENTER)
           waypoint_grid.Add(text_joint)
 
-    # waypoint_grid.AddMany([ (wx.Button(self.panel_main, label='Waypoint'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='dur'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='closed'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='1'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='2'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='3'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='4'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='5'), 0, wx.EXPAND),
-    #                         (wx.Button(self.panel_main, label='6'), 0, wx.EXPAND) ])
-
-    # t1 = wx.TextCtrl(self.panel_main, value = "0.123456789", style =  wx.TE_CENTER)
-    # t1.SetMaxLength(8)
-    # waypoint_grid.Add(t1,1, wx.EXPAND) 
-
     self.vbox_waypoints.Add(waypoint_grid, flag = wx.ALIGN_CENTER)
     self.main_box.Add(self.vbox_waypoints, proportion = 3, flag=wx.EXPAND)
 
@@ -395,20 +377,14 @@ class TeachRepeatFrame(wx.Frame):
     self.Close(True)
 
   def on_load(self, event):
-    # self.contentSaved = False
-    # if not self.contentSaved:
-    #     if wx.MessageBox("Current waypoint has not been saved! Proceed?", "Lose current ",
-    #                      wx.ICON_QUESTION | wx.YES_NO, self) == wx.NO:
-    #         return
 
     if self.hebi_thread.run_mode is "playback":
       wx.MessageBox("You can't load waypoints during playback. Please switch back to training mode.", "Switch back to training mode")
     else:
       with wx.FileDialog(self, "Load waypoints from CSV file", wildcard="CSV files (*.csv)|*.csv",
                         style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as fileDialog:
-
         if fileDialog.ShowModal() == wx.ID_CANCEL:
-          return     # the user changed their mind
+          return # the user changed their mind
 
         # Proceed loading the file chosen by the user
         pathname = fileDialog.GetPath()
@@ -427,7 +403,7 @@ class TeachRepeatFrame(wx.Frame):
           wx.LogError("Cannot open file '%s'." % newfile)
 
   def on_save(self, event):
-    # This button will print an error that is to be EXPECTED on macos.
+    # This button will print a warning that is to be EXPECTED on macos.
     # This error does not affect functionality, and is apparantely unavoidable.
     
     if self.hebi_thread.run_mode is "playback":
