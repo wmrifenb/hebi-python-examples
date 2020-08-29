@@ -74,6 +74,7 @@ class Gripper(object):
         self.setState(0)
 
     def toggle(self):
+        # if the value is not 0 or 1, it will default to 0 (which is open)
         if self.state == 0:
             self.setState(1)
         else:
