@@ -15,5 +15,5 @@
   <actuator type="X5-4"/>
   <bracket type="X5LightRight"/>
   <actuator type="X5-4"/>
-  <end-effector type="X5Parallel"/>
+  <!-- <end-effector type="X5Parallel"/> -->
 </robot>

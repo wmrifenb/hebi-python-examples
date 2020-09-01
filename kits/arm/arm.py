@@ -208,7 +208,7 @@ class Arm():
         mArray[:, 0] = prev_cmd
         if flow == None:
             for i in range(size):
-                if array == None:
+                if array is None:
                     mArray[:, i+1] = np.zeros(self.group.size)
                 else:
                     mArray[:, i+1] = array[i]
