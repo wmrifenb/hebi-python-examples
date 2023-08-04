@@ -23,6 +23,10 @@ class ArmControlState(Enum):
 
 
 class ArmMobileIOInputs:
+    class TrajType(Enum):
+        JOINT = auto()
+        CARTESIAN = auto()
+
     def __init__(self,
                  m: 'MobileIO',
                  num_joints: 'int',
@@ -35,7 +39,7 @@ class ArmMobileIOInputs:
         self.num_joints = num_joints
 
         self.joint_dt = 0.2
-        self.joint_velocity_max = 1.0
+        self.joint_velocity_max = np.pi
         self.joint_velocity = np.zeros(self.num_joints)
         self.prev_joint_velocity = np.zeros(self.num_joints)
         self.joint_displacement = np.zeros(self.num_joints)
@@ -43,11 +47,13 @@ class ArmMobileIOInputs:
         self.alpha_joint = 0.1
 
         self.cartesian_dt = 0.2
-        self.cartesian_velocity_max = 0.25
+        self.cartesian_velocity_max = 1
         self.cartesian_velocity = np.zeros(3)
         self.prev_cartesian_velocity = np.zeros(3)
         self.cartesian_displacement = np.zeros(3)
-        self.alpha_cartesian = 0.2
+        self.alpha_cartesian = 0.1
+
+        self.mode = None
 
         self.locked = locked
         self.active = active
@@ -63,44 +69,36 @@ class ArmMobileIOInputs:
         
         self.joint_direction = -(int(self.mio.get_button_state(7)) * 2 - 1)
 
-        for i in range(self.num_joints):
-            self.joint_velocity[i] = int(self.mio.get_button_state(i+1)) * self.joint_velocity_max * self.joint_direction
+        for i in range(2, self.num_joints):
+            self.joint_velocity[i] = int(self.mio.get_button_state(i-1)) * self.joint_velocity_max * self.joint_direction
 
         self.cartesian_velocity[0] = self.mio.get_axis_state(8) * self.cartesian_velocity_max
         self.cartesian_velocity[1] = -self.mio.get_axis_state(7) * self.cartesian_velocity_max
         self.cartesian_velocity[2] = self.mio.get_axis_state(5) * self.cartesian_velocity_max
 
-        self.prev_cartesian_velocity = self.cartesian_velocity * self.alpha_cartesian + self.prev_cartesian_velocity * (1.0 - self.alpha_cartesian)
+        self.prev_cartesian_velocity = self.cartesian_velocity * self.alpha_cartesian + self.prev_cartesian_velocity * (1.0 - self.alpha_cartesian)    
         self.prev_joint_velocity = self.joint_velocity * self.alpha_joint + self.prev_joint_velocity * (1.0 - self.alpha_joint)
-    
-    def get_arm_inputs(self):
-        if np.linalg.norm(self.cartesian_displacement) > 1e-3:
-            return self.prev_cartesian_velocity * self.cartesian_dt
+        if np.linalg.norm(self.prev_cartesian_velocity) > 1e-3:
+            self.cartesian_displacement = self.prev_cartesian_velocity * self.cartesian_dt
+            self.mode = self.TrajType.CARTESIAN
         elif np.linalg.norm(self.prev_joint_velocity) > 1e-2:
-            return self.prev_joint_velocity * self.joint_dt
+            self.joint_displacement = self.prev_joint_velocity * self.joint_dt
+            self.mode = self.TrajType.JOINT
         else:
-            return np.zeros(self.num_joints)
+            self.joint_displacement = np.zeros(self.num_joints)
+            self.cartesian_displacement = np.zeros(3)
+            self.mode = None
+        
+        self.locked = m.get_button_state(6)
+        self.active = m.get_button_state(5)
+        self.gripper_closed = m.get_button_state(8)
 
 
 class ArmControl:
     def __init__(self, arm: 'Arm'):
         self.state = ArmControlState.STARTUP
-        self.arm = arm
-
-        # 5 DoF home
-        #self.arm_xyz_home = [0.34, 0.0, 0.23]
-        # 6 DoF home
-        self.arm_xyz_home = [0.4, 0.0, 0.0]
-        self.arm_rot_home: 'npt.NDArray[np.float64]' = (R.from_euler('z', np.pi / 2) * R.from_euler('x', np.pi)).as_matrix()
-
-        # 5 DoF seed
-        #self.arm_seed_ik = np.array([0.25, -1.0, 0, -0.75, 0])
-        # 6 DoF seed
-        self.arm_seed_ik = np.array([0, 0.5, 2, 3, -1.5, 0])
-        self.arm_home = self.arm.ik_target_xyz_so3(
-            self.arm_seed_ik,
-            self.arm_xyz_home,
-            self.arm_rot_home)
+        self.arm = arm        
+        self.arm_home = np.array([0.0, np.pi * 2 / 3, np.pi * 2 / 3, 0.0, np.pi / 2, 0.0])
 
     @property
     def running(self):
@@ -131,8 +129,6 @@ class ArmControl:
 
             elif self.state is self.state.HOMING:
                 if self.arm.at_goal:
-                    # self.phone_xyz_home = arm_input.phone_pos
-                    # self.phone_rot_home = arm_input.phone_rot
                     self.transition_to(t_now, self.state.TELEOP)
                 return True
 
@@ -181,41 +177,46 @@ class ArmControl:
         self.state = state
 
     def compute_arm_goal(self, arm_inputs: ArmMobileIOInputs):
-        xyz_scale = np.array([1.0, 1.0, 1.0])
+        arm_goal = hebi.arm.Goal(self.arm.size)
 
-        phone_xyz = arm_inputs.phone_pos
-        phone_rot = arm_inputs.phone_rot
+        # Get current joint position
+        # We use the last position command for smoother motion
+        cur_position = np.zeros(self.arm.size)
+        self.arm.last_feedback.get_position_command(cur_position)
 
-        if not arm_inputs.active:
-            # update phone "zero"
-            self.phone_xyz_home = phone_xyz
-            self.phone_rot_home = phone_rot
+        if arm_inputs.mode is None or not arm_inputs.active:
             return None
-        else:
-            phone_offset = phone_xyz - self.phone_xyz_home
-            rot_mat = self.phone_rot_home
-            arm_xyz_target = self.arm_xyz_home + xyz_scale * (rot_mat.T @ phone_offset)
-            arm_rot_target = rot_mat.T @ phone_rot @ self.arm_rot_home
+        elif arm_inputs.mode is arm_inputs.TrajType.CARTESIAN:
+            arm_xyz = np.zeros(3)
+            arm_rot = np.zeros((3, 3))
+            self.arm.FK(cur_position, xyz_out=arm_xyz, orientation_out=arm_rot)
+            arm_xyz_target = arm_xyz + arm_inputs.cartesian_displacement
 
             joint_target = self.arm.ik_target_xyz_so3(
-                self.arm_seed_ik,
+                cur_position,
                 arm_xyz_target,
-                arm_rot_target)
+                arm_rot)
 
-            arm_goal = hebi.arm.Goal(self.arm.size)
             arm_goal.add_waypoint(position=joint_target)
-            return arm_goal
+        elif arm_inputs.mode is arm_inputs.TrajType.JOINT:
+            arm_goal.add_waypoint(position=cur_position + arm_inputs.joint_displacement)
+        
+        return arm_goal
 
 
 def setup_mobile_io(m: 'MobileIO'):
-    m.set_button_label(1, '⟲')
+    m.set_button_label(6, '⌂')
     m.set_button_label(5, 'arm')
     m.set_button_mode(5, 1)
-    m.set_button_label(7, 'grip')
+    m.set_button_label(8, 'grip')
+    m.set_button_mode(8, 1)
     m.set_button_mode(7, 1)
 
-
-
+    m.set_axis_label(7, "y")
+    m.set_axis_label(8, "x")
+    m.set_snap(3, 0.0)
+    m.set_snap(5, 0.0)
+    m.set_button_label(7, '⟲')
 
 
 if __name__ == "__main__":
@@ -248,13 +249,16 @@ if __name__ == "__main__":
     m.update()
     setup_mobile_io(m)
 
+    # Arm inputs
+    arm_inputs = ArmMobileIOInputs(m, arm.size, False, False, False)
+
     #######################
     ## Main Control Loop ##
     #######################
 
     while arm_control.running:
         t = time()
-        arm_inputs = parse_mobile_feedback(m)
+        arm_inputs.parse_mobile_feedback()
         arm_control.update(t, arm_inputs)
 
         arm_control.send()
