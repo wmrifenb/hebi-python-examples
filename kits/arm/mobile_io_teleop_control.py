@@ -13,6 +13,9 @@ if typing.TYPE_CHECKING:
     from hebi._internal.mobile_io import MobileIO
     from hebi.arm import Arm
 
+import os
+import json
+
 
 class ArmControlState(Enum):
     STARTUP = auto()
@@ -32,22 +35,28 @@ class ArmMobileIOInputs:
                  num_joints: 'int',
                  locked: bool,
                  active: bool,
-                 gripper_closed: bool):
+                 gripper_closed: bool,
+                 joint_vel_max: 'Optional[float]' = 1.0,
+                 cartesian_vel_max: 'Optional[float]' = 3,
+                 max_abs_x: 'Optional[float]' = 0.5,
+                 max_abs_y: 'Optional[float]' = 0.5,
+                 min_z: 'Optional[float]' = 0.0,
+                 max_z: 'Optional[float]' = 0.5):
 
         self.mio = m
         
         self.num_joints = num_joints
+        self.t = None
+        self.dt = 0.01
 
-        self.joint_dt = 0.2
-        self.joint_velocity_max = np.pi
+        self.joint_velocity_max = joint_vel_max * (np.pi/0.0425)
         self.joint_velocity = np.zeros(self.num_joints)
         self.prev_joint_velocity = np.zeros(self.num_joints)
         self.joint_displacement = np.zeros(self.num_joints)
         self.joint_direction = 1.0
         self.alpha_joint = 0.1
 
-        self.cartesian_dt = 0.2
-        self.cartesian_velocity_max = 1
+        self.cartesian_velocity_max = cartesian_vel_max * (6)
         self.cartesian_velocity = np.zeros(3)
         self.prev_cartesian_velocity = np.zeros(3)
         self.cartesian_displacement = np.zeros(3)
@@ -58,12 +67,21 @@ class ArmMobileIOInputs:
         self.locked = locked
         self.active = active
         self.gripper_closed = gripper_closed
+
+        self.max_abs_x = max_abs_x
+        self.max_abs_y = max_abs_y
+        self.min_z = min_z
+        self.max_z = max_z
     
     def clear_input(self):
         self.joint_velocity = np.zeros(self.num_joints)
         self.cartesian_velocity = np.zeros(3)
     
-    def parse_mobile_feedback(self):
+    def parse_mobile_feedback(self, time: float):
+        if self.t is not None:
+            self.dt = (time - self.t) 
+        self.t = time
+
         if not self.mio.update(0.0):
             self.clear_input()
         
@@ -79,10 +97,10 @@ class ArmMobileIOInputs:
         self.prev_cartesian_velocity = self.cartesian_velocity * self.alpha_cartesian + self.prev_cartesian_velocity * (1.0 - self.alpha_cartesian)    
         self.prev_joint_velocity = self.joint_velocity * self.alpha_joint + self.prev_joint_velocity * (1.0 - self.alpha_joint)
         if np.linalg.norm(self.prev_cartesian_velocity) > 1e-3:
-            self.cartesian_displacement = self.prev_cartesian_velocity * self.cartesian_dt
+            self.cartesian_displacement = self.prev_cartesian_velocity * self.dt
             self.mode = self.TrajType.CARTESIAN
         elif np.linalg.norm(self.prev_joint_velocity) > 1e-2:
-            self.joint_displacement = self.prev_joint_velocity * self.joint_dt
+            self.joint_displacement = self.prev_joint_velocity * self.dt
             self.mode = self.TrajType.JOINT
         else:
             self.joint_displacement = np.zeros(self.num_joints)
@@ -191,15 +209,23 @@ class ArmControl:
             arm_rot = np.zeros((3, 3))
             self.arm.FK(cur_position, xyz_out=arm_xyz, orientation_out=arm_rot)
             arm_xyz_target = arm_xyz + arm_inputs.cartesian_displacement
-
-            joint_target = self.arm.ik_target_xyz_so3(
-                cur_position,
-                arm_xyz_target,
-                arm_rot)
-
-            arm_goal.add_waypoint(position=joint_target)
         elif arm_inputs.mode is arm_inputs.TrajType.JOINT:
-            arm_goal.add_waypoint(position=cur_position + arm_inputs.joint_displacement)
+            target_position = cur_position + arm_inputs.joint_displacement
+            arm_xyz_target = np.zeros(3)
+            arm_rot = np.zeros((3, 3))
+            self.arm.FK(target_position, xyz_out=arm_xyz_target, orientation_out=arm_rot)
+
+        # Apply limits
+        arm_xyz_target[0] = np.clip(arm_xyz_target[0], -arm_inputs.max_abs_x, arm_inputs.max_abs_x)
+        arm_xyz_target[1] = np.clip(arm_xyz_target[1], -arm_inputs.max_abs_y, arm_inputs.max_abs_y)
+        arm_xyz_target[2] = np.clip(arm_xyz_target[2], arm_inputs.min_z, arm_inputs.max_z)
+
+        joint_target = self.arm.ik_target_xyz_so3(
+            cur_position,
+            arm_xyz_target,
+            arm_rot)
+
+        arm_goal.add_waypoint(position=joint_target)
         
         return arm_goal
 
@@ -220,14 +246,29 @@ def setup_mobile_io(m: 'MobileIO'):
 
 
 if __name__ == "__main__":
+
+    PARAMS_DIR = os.path.dirname(os.path.realpath(__file__)) + "/params/"
+    params_file = PARAMS_DIR + "mobile_io_teleop_control.json"
+
+    # Read parameters from file into dictionary
+    params = None
+    with open(params_file) as f:
+        try:
+            params = json.load(f)
+        except json.decoder.JSONDecodeError:
+            raise RuntimeError('Could not parse parameters file')
+
+    if params is None:
+        raise RuntimeError('Could not read parameters file')
+
     lookup = hebi.Lookup()
     sleep(2)
 
     # Arm setup
     arm_family = "Arm"
     module_names = ['J1_base', 'J2_shoulder', 'J3_elbow', 'J4_wrist1', 'J5_wrist2', 'J6_wrist3']
-    hrdf_file = "hrdf/A-2085-06.hrdf"
-    gains_file = "gains/A-2085-06.xml"
+    hrdf_file = os.path.dirname(os.path.realpath(__file__)) + "/hrdf/" + "A-2085-06.hrdf"
+    gains_file = os.path.dirname(os.path.realpath(__file__)) + "/gains/" + "A-2085-06.xml"
 
     # Create Arm object
     arm = hebi.arm.create([arm_family],
@@ -239,26 +280,36 @@ if __name__ == "__main__":
     arm_control = ArmControl(arm)
 
     # Setup MobileIO
+    sleep(1)
     print('Looking for Mobile IO...')
     m = create_mobile_io(lookup, arm_family)
-    while m is None:
-        print('Waiting for Mobile IO device to come online...')
-        sleep(1)
-        m = create_mobile_io(lookup, arm_family)
+
+    if m is None:
+        raise RuntimeError('Could not find Mobile IO')
 
     m.update()
     setup_mobile_io(m)
 
     # Arm inputs
-    arm_inputs = ArmMobileIOInputs(m, arm.size, False, False, False)
-
+    arm_inputs = ArmMobileIOInputs(m,
+                                   arm.size,
+                                   False,
+                                   False,
+                                   False,
+                                   joint_vel_max=params.get('joint_vel_max', 1.0),
+                                   cartesian_vel_max=params.get('cartesian_vel_max', 0.003),
+                                   max_abs_x=params.get('max_abs_x', 0.5),
+                                   max_abs_y=params.get('max_abs_y', 0.5),
+                                   min_z=params.get('min_z', 0.0),
+                                   max_z=params.get('max_z', 0.5))
+    
     #######################
     ## Main Control Loop ##
     #######################
 
     while arm_control.running:
         t = time()
-        arm_inputs.parse_mobile_feedback()
+        arm_inputs.parse_mobile_feedback(t)
         arm_control.update(t, arm_inputs)
 
         arm_control.send()
